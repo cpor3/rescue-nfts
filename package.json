@@ -1,0 +1,21 @@
+{
+  "name": "rescue-nfts",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "ts-node index.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "ethers": "^6.8.0",
+    "md5": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/md5": "^2.3.4",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2"
+  }
+}
