@@ -1,6 +1,13 @@
 import { InfuraProvider, Wallet, TransactionRequest, BaseContractMethod, TransactionResponse } from "ethers";
 import { DEFAULT_GAS_PRICE, DEFAULT_GAS_UNITS, DEFAULT_BASE_FEE, DEFAULT_PRIORITY_FEE } from "./constants";
 
+export async function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => {
+        setTimeout(() => {
+            resolve();
+        }, ms);
+    })
+}
 export async function getCurrentGasPrice(provider: InfuraProvider): Promise<bigint> {
     const feeData = await provider.getFeeData();
     return feeData.gasPrice ?? DEFAULT_GAS_PRICE;
@@ -36,16 +43,14 @@ export async function estimateGasForContractMethod(contractMethod: BaseContractM
     return estimatedGasUnits;
 }
 
-export async function sendFunds(safeWallet: Wallet, compromisedWallet: Wallet, provider: InfuraProvider, valueToSend: bigint): Promise<TransactionResponse> {
-    const nonce = await provider.getTransactionCount(safeWallet.address);
+export async function sendFunds(safeWallet: Wallet, compromisedWallet: Wallet, provider: InfuraProvider, valueToSend: bigint): Promise<TransactionResponse | null> {
+    // const nonce = await provider.getTransactionCount(safeWallet.address);
     const txnData = {
         to: compromisedWallet.address,
         gasLimit: 21000,
-        nonce: nonce,
+        // nonce: nonce,
         value: valueToSend
     };  
-    console.log('Sending MATIC from safe wallet...');
     const txn = safeWallet.sendTransaction(txnData);
-
     return txn;
 }

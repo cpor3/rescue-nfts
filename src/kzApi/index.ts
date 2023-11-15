@@ -6,12 +6,13 @@ import {
     InGameSerumResponse,
     InGameFightersResponse,
     WithdrawalRulesResponse,
+    PreClaimSerumResponse,
     PreClaimFightersResponse,
     FightersResponse,
     TokensResponse,
 } from './types';
 import { config } from 'dotenv';
-import { Wallet } from 'ethers';
+import { Contract, Wallet, formatEther } from 'ethers';
 config();
 
 const BASE_URL = "https://api.karmaverse.io/api/v1";
@@ -104,6 +105,11 @@ export class KzApi {
         }
     }
 
+    async getWithdrawalsRules() {
+        const response = await this.get<WithdrawalRulesResponse>(`wallet-nft/player/query/withdrawalrules`);
+        return response.data.data;
+    }
+
     async getInGameKnots() {
         const response = await this.get<InGameKnotsResponse>(`wallet-nft/player/query/knot?address=${this.compromisedWallet}`);
         return response.data.data.inGameAmount;
@@ -114,13 +120,28 @@ export class KzApi {
         return response.data.data.inGameAmount;
     }
 
-    async getWithdrawalsRules() {
-        const response = await this.get<WithdrawalRulesResponse>(`wallet-nft/player/query/withdrawalrules`);
-        return response.data.data;
-    }
-
     async getInGameFighters() {
         const response = await this.get<InGameFightersResponse>(`wallet-nft/fighter/queryingame?address=${this.compromisedWallet}`);
+        return response.data.data;
+    }
+   
+    async getKnots(knotContract: Contract) {
+        const response = await knotContract.balanceOf(this.compromisedWallet);
+        return response;
+    }
+
+    async getSerum() {
+        const response = await this.get<InGameSerumResponse>(`wallet-nft/serum/query?address=${this.compromisedWallet}`);
+        return response.data.data.outGameAmount;
+    }
+
+    async getFighters(page=0, limit=200) {
+        const response = await this.get<FightersResponse>(`assets/0x60ce73cF71Def773a7a8199D4e6B2F237D5a6b32/inventory?page=${page}&limit=${limit}`);
+        return response.data;
+    }
+
+    async preClaimSerum(qty: number) {
+        const response = await this.get<PreClaimSerumResponse>(`wallet-nft/serum/claim?num=${qty}&address=${this.compromisedWallet}`);
         return response.data.data;
     }
 
@@ -129,8 +150,21 @@ export class KzApi {
         return response.data.data;
     }
 
-    async getFighters(page=0, limit=200) {
-        const response = await this.get<FightersResponse>(`assets/0x60ce73cF71Def773a7a8199D4e6B2F237D5a6b32/inventory?page=${page}&limit=${limit}`);
-        return response.data;
+    async getBalances(knotContract: Contract) {        
+        const knotBalance = await this.getKnots(knotContract);
+        const serumBalance = await this.getSerum();
+        const fighters = await this.getFighters();
+        const inGameKnots = await this.getInGameKnots();
+        const inGameSerum = await this.getInGameSerum();
+        const inGameFighters = (await this.getInGameFighters()).map(fighter => fighter.tokenId);        
+      
+        return {
+            knotBalance, 
+            serumBalance,
+            fighters,
+            inGameKnots,
+            inGameSerum,
+            inGameFighters,
+        };
     }
 }

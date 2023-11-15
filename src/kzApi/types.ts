@@ -70,6 +70,20 @@ export type WithdrawalRulesResponse = KzApiResponse<{
     withdrawalRuleGroupList: Array<any>
 }>
 
+export type PreClaimSerum = {
+    success: boolean,
+    errorReason?: string,
+    account?: string,
+    txId: string,
+    timestamp: number,
+    signature: string,
+    amount: string,
+    fee: string
+
+}
+
+export type PreClaimSerumResponse = KzApiResponse<PreClaimSerum>;
+
 export type PreClaimFighters = {
     success: boolean,
     errorReason?: string,

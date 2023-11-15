@@ -2,16 +2,19 @@
   "name": "rescue-nfts",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
-    "dev": "ts-node index.ts"
+    "dev": "ts-node src/index.ts",
+    "start": "tsc && npm run dev"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.3.1",
     "ethers": "^6.8.0",
-    "md5": "^2.3.0"
+    "fireblocks-sdk": "^5.9.0",
+    "md5": "^2.3.0",
+    "winston": "^3.11.0"
   },
   "devDependencies": {
     "@types/md5": "^2.3.4",

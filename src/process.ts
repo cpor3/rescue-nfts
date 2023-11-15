@@ -4,18 +4,29 @@ import SerumContract from './contracts/serumContract.json';
 import KzKnotContract from './contracts/kzKnotContract.json';
 import KzFighterContract from './contracts/kzFighterContract.json';
 import { MAX_RETRIES, MAX_RETRIES_REFUND, PF_INCREASE } from './constants';
-import { estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, sendFunds, getCurrentMaxPriorityFee, getCurrentBaseFee } from './utils';
+import { sleep, estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, sendFunds, getCurrentMaxPriorityFee, getCurrentBaseFee } from './utils';
 import { KzApi } from "./kzApi";
 import { config } from 'dotenv';
 import { PreClaimFighters } from './kzApi/types';
+import { Account } from './accounts/types';
+import { parentPort, workerData } from 'worker_threads';
+import { saveAccounts } from './';
+import { dLogger } from './logger';
 config();
+
+const cconsole = {
+    log: (message: string) => dLogger.info(workerData?.account?.fireblocksVault, message)
+};
 
 const provider = new InfuraProvider("matic");
 
 export type ProcessConfig = {
+    readOnly?: boolean,
     safeWalletPrivateKey: string, 
     compromisedWalletPrivateKey: string,
     toWalletAddress?: string,
+    claimSerum?: boolean,
+    claimFighters?: boolean,
     verifyKnots?: boolean,
     manualPreClaimInput?: PreClaimFighters,
     manualTokenIds?: Array<number>,
@@ -23,8 +34,11 @@ export type ProcessConfig = {
 
 async function processAccount(config: ProcessConfig) {
     const {
+        readOnly = false,
         safeWalletPrivateKey, 
         compromisedWalletPrivateKey,
+        claimSerum = true,
+        claimFighters = true,
         verifyKnots = true,
         manualPreClaimInput,
         manualTokenIds
@@ -45,66 +59,151 @@ async function processAccount(config: ProcessConfig) {
     
     const accountOk = await api.initialize(compromisedWallet);
     if (!accountOk) {
-        console.log('Account doesn\'t exist, is locked, or invalid tokens set for Kz API.');
-        return;
+        cconsole.log('Account doesn\'t exist, is locked, or invalid tokens set for Kz API.');
+        return endProcess(false);
     }
 
     const {
         knotBalance, 
         serumBalance,
+        fighters,
         inGameKnots,
         inGameSerum,
         inGameFighters,
-        inGameFightersBatch20
-    } = await getBalances(api, knotContract, serumContract, compromisedWallet.address);
+    } = await api.getBalances(knotContract);
+
+    cconsole.log(`--=== Balances ===--`);
+    cconsole.log(`Knot Balance: ${formatEther(knotBalance)}`);
+    cconsole.log(`Serum Balance: ${serumBalance}`);
+    cconsole.log(`In-game Knots: ${formatEther(inGameKnots)}`);
+    cconsole.log(`In-game Serum: ${inGameSerum}`);
+    cconsole.log(`In-game Figthers (${inGameFighters?.length || 0}): ${inGameFighters?.join(',') || ''}`);
+    cconsole.log(`Fighters in wallet: ${fighters.length ? fighters?.map(fighter => fighter.tokenId).join(',') : 0}`);
+  
+    // Check if processing of the account is done:
+    if (
+        serumBalance === 0 && // no serum on wallet
+        !fighters?.length && // no fighters on wallet
+        BigInt(inGameKnots) < BigInt(10*1e18) && // less than 10 in-game knots
+        (inGameSerum <= 100 || (inGameSerum > 100 && !inGameFighters?.length)) && // minimum qty of Serum allowed to transfer is 100, fighters required to withdraw serum
+        !inGameFighters?.length // no in-game fighers
+    ) {
+        cconsole.log('Account successfully processed.');
+        endProcess(true);
+    }
+
+    if (readOnly) {
+        cconsole.log('Read only mode. Exiting.');
+        return endProcess(false);
+    }
+    
+    // Claim Serum (the minimum allowed claim qty is 100)
+    let serumNetAmount = 0;
+    if (claimSerum && inGameSerum >= 100) {
+        // Pre-claim Serum on API
+        cconsole.log('Pre-claiming serum to API...');
+        const preClaimSerum = await api.preClaimSerum(inGameSerum);
+        if (!preClaimSerum?.success) {
+            cconsole.log(`Error while trying to claim serum on API: ${preClaimSerum?.errorReason}`);
+            await returnUnusedFunds(safeWallet, compromisedWallet);
+            return endProcess(false);
+        }
+        cconsole.log(`Pre-claim OK: ${preClaimSerum}`);
+
+        // Claim Serum on smart contract
+        cconsole.log('Trying to claim Serum...')
+        const { txId, timestamp, signature } = preClaimSerum!;
+        serumNetAmount = Number(preClaimSerum.amount) || 0;
+        const claimSerum = await execute(safeWallet, compromisedWallet, serumContract.withdraw, [
+            compromisedWallet.address,
+            serumNetAmount,
+            txId,
+            timestamp,
+            signature
+        ]);
+        if (!claimSerum.success) { // if serum claim failed, end process to avoid withdrawing nfts (still need them to withdraw the serum)
+            cconsole.log('Error while trying to claim serum on smart contract');
+            await returnUnusedFunds(safeWallet, compromisedWallet);
+            return endProcess(false);
+        }
+        cconsole.log(`Claim OK: ${claimSerum.txn?.hash}`);        
+    }
+
+    // Transfer serum on wallet (if any)
+    serumNetAmount = serumNetAmount || serumBalance;
+    if (serumNetAmount > 0) {
+        cconsole.log('Trying to transfer Serum to safe wallet...')
+        const transferSerum = await execute(safeWallet, compromisedWallet, serumContract.transfer, [
+            toWalletAddress,
+            serumNetAmount
+        ]);
+        if (transferSerum.success) cconsole.log(`Transfer of Serum OK: ${transferSerum.txn?.hash}`);
+    }
 
     // Check required in-game knots
     const requiredKnotsForWithdrawals = Math.ceil(inGameFighters.length / 20) * 10;
     const missingKnots = requiredKnotsForWithdrawals - Number(formatEther(inGameKnots));
     if (verifyKnots && missingKnots > 0) {
-        console.log('Insufficient In-game Knots for Fighters withdrawals.');
+        cconsole.log('Insufficient In-game Knots for Fighters withdrawals.');
         if (missingKnots > Number(formatEther(knotBalance))) {
-            console.log('Insufficient Knots on wallet.');
-            return;
+            cconsole.log('Insufficient Knots on wallet.');
+            return endProcess(false);
         }
-        console.log('Trying to deposit Knots...');
+        const allowance = await knotContract.allowance(compromisedWallet, KzKnotContract.address);
+        if (allowance < BigInt(missingKnots * 1e18)) {
+            cconsole.log('Trying to approve allowance on KzKnot contract...');
+            const approveKzKnotContract = await execute(safeWallet, compromisedWallet, knotContract.approve, [
+                KzKnotContract.address,
+                "9999999999999999999999"
+            ]);
+            if (!approveKzKnotContract.success) {
+                cconsole.log('Error while trying to approve allowance');
+                await returnUnusedFunds(safeWallet, compromisedWallet);
+                return endProcess(false);
+            }
+            cconsole.log(`Approval OK: ${approveKzKnotContract.txn?.hash}`);
+        }
+        cconsole.log('Trying to deposit Knots...');
         const depositKnots = await execute(safeWallet, compromisedWallet, kzKnotContract.deposit, [
             compromisedWallet.address,
-            knotBalance
+            BigInt(missingKnots * 1e18)
         ]);
         if (!depositKnots.success) {
-            console.log('Error while trying to deposit knots');
+            cconsole.log('Error while trying to deposit knots');
             await returnUnusedFunds(safeWallet, compromisedWallet);
-            return;
+            return endProcess(false);
         }    
-        console.log('Deposit OK: ', depositKnots.txn?.hash);
+        cconsole.log(`Deposit OK: ${depositKnots.txn?.hash}`);
+        cconsole.log('Giving some time to the API to register the deposited knots...');
+        await sleep(6000);
     }
 
-    console.log('');
+    cconsole.log('');
 
     // Claim fighters (if any)
     let tokenIds: Array<number> | undefined;
-    if (inGameFighters.length) {
+    const inGameFightersBatch20 = inGameFighters.slice(0, 20); // Max 20 fighters per claim
+    if (claimFighters && inGameFighters.length) {
         let preClaimFighters: PreClaimFighters | null;
         
         if (manualPreClaimInput) {
             // Use alredy claimed data
-            console.log('Using manual input for fighters pre-claim: ', manualPreClaimInput);
+            cconsole.log(`Using manual input for fighters pre-claim: ${manualPreClaimInput}`);
             preClaimFighters = manualPreClaimInput!;
         } else {
             // Pre-claim Fighters on API
-            console.log('Pre-claiming fighters to API...');
+            cconsole.log('Pre-claiming fighters to API...');
             preClaimFighters = await api.preClaimFighters(inGameFightersBatch20);
             if (!preClaimFighters?.success) {
-                console.log('Error while trying to claim fighters on API:', preClaimFighters?.errorReason);
+                cconsole.log(`Error while trying to claim fighters on API: ${preClaimFighters?.errorReason}`);
                 await returnUnusedFunds(safeWallet, compromisedWallet);
-                return;
+                return endProcess(false);
             }
-            console.log('Pre-claim OK: ', preClaimFighters);
+            cconsole.log(`Pre-claim OK: ${preClaimFighters}`);
         }
 
         // Claim Fighters on smart contract
-        console.log('Trying to claim Nfts...')
+        cconsole.log('Trying to claim Nfts...')
         tokenIds = preClaimFighters!.tokenIds;
         const { txId, timestamp, signature } = preClaimFighters!;
         const claimFighters = await execute(safeWallet, compromisedWallet, kzFighterContract.batchClaim, [
@@ -114,68 +213,37 @@ async function processAccount(config: ProcessConfig) {
             timestamp, 
             signature
         ]);
-        if (claimFighters.success) console.log('Claim OK: ', claimFighters.txn?.hash);
+        if (claimFighters.success) cconsole.log(`Claim OK: ${claimFighters.txn?.hash}`);
     }
 
     if (!tokenIds) {
         // No fighters recently claimed
         if (manualTokenIds) {
             // If manual input provided, use that list
-            console.log('Using manual input for Nfts list: ', manualTokenIds?.join(','));
+            cconsole.log(`Using manual input for Nfts list: ${manualTokenIds?.join(',')}`);
             tokenIds = manualTokenIds;
         } else {
             // Otherwise, read data from Kz API
-            console.log('Reading Nfts from Kz API...');
+            cconsole.log('Reading Nfts from Kz API...');
             const response = await api.getFighters();
             if (Array.isArray(response) && response.length) {
                 tokenIds = response.map(fighter => fighter.tokenId);
-                console.log('Using Nfts list from API: ', tokenIds?.join(','));
+                cconsole.log(`Using Nfts list from API: ${tokenIds?.join(',')}`);
             }
         }
     }
     
     // Transfer NFTs to a safe wallet (if any)
     if (tokenIds?.length) {
-        console.log('Trying to transfer Nfts...')
+        cconsole.log('Trying to transfer Nfts...')
         const nfts = await transferNfts(safeWallet, compromisedWallet, toWalletAddress, tokenIds!, kzFighterContract);
-        if (nfts.success) console.log('Transfer OK');
+        if (nfts.success) cconsole.log('Transfer OK: all tokens transferred');
+        if (!nfts.success) cconsole.log(`Transfer Failed: only transferred ${nfts.tokensTransferred.length} out of ${tokenIds.length}.`);
     }
 
     // Return funds (if any)
     await returnUnusedFunds(safeWallet, compromisedWallet);
-}
-
-async function getBalances(api: KzApi, knotContract: Contract, serumContract: Contract, compromisedWallet: string) {
-    console.log('--=== Balances ===--');
-
-    const knotBalance = await knotContract.balanceOf(compromisedWallet);
-    console.log('Knot Balance: ', formatEther(knotBalance));
-
-    const serumBalance = await serumContract.balanceOf(compromisedWallet);
-    console.log('Serum Balance: ', formatEther(serumBalance));
-
-    const inGameKnots = await api.getInGameKnots();
-    console.log('In-game Knots: ', formatEther(inGameKnots));
-    
-    const inGameSerum = await api.getInGameSerum();
-    console.log('In-game Serum: ', inGameSerum);
-    
-    const inGameFighters = (await api.getInGameFighters()).map(fighter => fighter.tokenId);
-    console.log('In-game Figthers: ', inGameFighters.join(',') || 0);
-
-    const fighters = await api.getFighters();
-    console.log('Fighters in wallet: ', fighters.length ? fighters?.map(fighter => fighter.tokenId).join(',') : 0);
-
-    const inGameFightersBatch20 = inGameFighters.slice(0, 20);
-
-    return {
-        knotBalance, 
-        serumBalance,
-        inGameKnots,
-        inGameSerum,
-        inGameFighters,
-        inGameFightersBatch20
-    };
+    return endProcess(false);
 }
 
 async function getContracts(safeWalletPrivateKey: string, compromisedWalletPrivateKey: string) {
@@ -217,12 +285,14 @@ async function execute(
     const priorityFee = maxPriorityFee || (await getCurrentMaxPriorityFee(provider)) * BigInt(100 + PF_INCREASE) / BigInt(100); // defaults to maxPriorityFee +X%
     const gasRequired = estimatedGasUnitsPlus10perc * ((currentBaseFee * BigInt(2)) + priorityFee);
     
-    console.log('Gas units (+10%): ', estimatedGasUnitsPlus10perc.toString());
-    console.log('Base fee per gas: ', formatUnits(currentBaseFee, 'gwei'), 'Gwei');
-    console.log('Priority fee per gas: ', formatEther(priorityFee), 'MATIC');
-    console.log('Total gas required: ', formatEther(gasRequired), 'MATIC');
+    // cconsole.log('Gas units (+10%): ', estimatedGasUnitsPlus10perc.toString());
+    // cconsole.log('Base fee per gas: ', formatUnits(currentBaseFee, 'gwei'), 'Gwei');
+    // cconsole.log('Priority fee per gas: ', formatEther(priorityFee), 'MATIC');
+    // cconsole.log('Total gas required: ', formatEther(gasRequired), 'MATIC');
 
-    sendFunds(safeWallet, compromisedWallet, provider, gasRequired);
+    cconsole.log('Sending MATIC from safe wallet...');
+    sendFunds(safeWallet, compromisedWallet, provider, gasRequired)
+        .catch(error => cconsole.log(`Error while trying to send MATIC from safe wallet: ${error.shortMessage ?? error}`));
 
     // Execute transaction
     let txn: TransactionResponse | null = null;
@@ -238,10 +308,12 @@ async function execute(
             await txn?.wait();
             success = true;
         } catch (error: any) {
-            console.log('Failed (try ', retry+1, 'of', maxRetries, '): ', error?.shortMessage ?? error);
+            cconsole.log(`Failed (try ${retry+1} of ${maxRetries}): ${error?.shortMessage ?? error}`);
             retry++;
         }
     }
+
+    if (!success) cconsole.log(`Couldn\'t send trasaction after ${maxRetries} tries!`);
 
     return {
         success,
@@ -250,28 +322,30 @@ async function execute(
 }
 
 async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, maxRetries = MAX_RETRIES_REFUND) {
-    console.log('Returning funds from compromised wallet');
-    const txnData = {
+    cconsole.log('Returning funds from compromised wallet');
+    const txnData: any = {
         to: safeWallet.address,
         gasLimit: 21000,
         value: BigInt(1) // sample value of 1 wei for estimating gas only
-    };  
+    };
     const balance = await provider.getBalance(compromisedWallet.address);
-    const estimatedGasUnits = await estimateGasForTransaction(compromisedWallet, txnData);
-    const currentGasPrice = await getCurrentGasPrice(provider);
-    const estimatedFee = estimatedGasUnits * currentGasPrice * BigInt(110) / BigInt(100);
+    const estimatedGasUnitsPlus10perc = (await estimateGasForTransaction(compromisedWallet, txnData)) * BigInt(110) / BigInt(100);
+    const currentGasPricePlus10perc = (await getCurrentGasPrice(provider)) * BigInt(110) / BigInt(100);
+    const currentPriorityFeePlus20perc = (await getCurrentMaxPriorityFee(provider)) * BigInt(120) / BigInt(100);
+    const estimatedFee = estimatedGasUnitsPlus10perc * (currentGasPricePlus10perc + currentPriorityFeePlus20perc);
     const availableFunds = balance - estimatedFee;
     if (availableFunds < 0) {
-        console.log('No available funds.');
+        cconsole.log('No available funds.');
         return {
             success: false,
             txn: null
         };
     }
     txnData.value = availableFunds;
-    console.log('Current Balance: ', formatEther(balance), 'MATIC');
-    console.log('Estimated Fee (+10%): ', formatUnits(estimatedFee, 'gwei'), 'Gwei');
-    console.log('Available funds to transfer: ', formatEther(availableFunds), 'MATIC');
+    txnData.maxPriorityFeePerGas = currentPriorityFeePlus20perc;
+    cconsole.log(`Current Balance: ${formatEther(balance)} MATIC`);
+    cconsole.log(`Estimated Fee (+10%): ${formatEther(estimatedFee)} MATIC`);
+    cconsole.log(`Available funds to transfer: ${formatEther(availableFunds)} MATIC`);
 
     let txn: TransactionResponse | null = null;
     let retry = 0;
@@ -282,12 +356,12 @@ async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, 
             await txn.wait();
             success = true;
         } catch (error: any) {
-            console.log('Failed (try ', retry+1, 'of', maxRetries, '): ', error?.shortMessage ?? error);
+            cconsole.log(`Failed (try ${retry+1} of ${maxRetries}): ${error?.shortMessage ?? error}`);
             retry++;
         };
     }
 
-    if (success) console.log('Refund OK: ', txn?.hash);
+    if (success) cconsole.log(`Refund OK: ${txn?.hash}`);
 
     return {
         success,
@@ -297,19 +371,30 @@ async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, 
 
 async function transferNfts(safeWallet: Wallet, compromisedWallet: Wallet, toWalletAddress: string, tokenIds: Array<number>, kzFighterContract: Contract) {
     let success = true;
+    let tokensTransferred= [];
     for (let i=0; i<tokenIds.length; i++) {
         const transferNfts = await execute(safeWallet, compromisedWallet, kzFighterContract.transferFrom, [
             compromisedWallet.address,
             toWalletAddress,
             tokenIds[i]
         ]);
-        if (transferNfts.success) console.log('Transfer of NFT #', i+1, 'OK: ', transferNfts.txn?.hash);
+        if (transferNfts.success) {
+            tokensTransferred.push(tokenIds[i]);
+            cconsole.log(`Transfer of NFT #${i+1} OK: ${transferNfts.txn?.hash}`);
+        }
         success = success && transferNfts.success;
     }
     
     return {
         success,
+        tokensTransferred
     }
 }
+
+function endProcess(accountProcessCompleted: boolean) {
+    parentPort?.postMessage(accountProcessCompleted);
+}
+
+processAccount(workerData.config);
 
 export default processAccount;
