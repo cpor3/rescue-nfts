@@ -3,6 +3,6 @@ export type Account = {
     privateKey: string,
     newAddress: string,
     fireblocksVault: string,
-    status: string,
+    status: 'completed' | 'pending',
     updatedAt: string,
 }

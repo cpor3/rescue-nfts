@@ -5,3 +5,5 @@ export const DEFAULT_PRIORITY_FEE = BigInt(2e9) // 2 Gwei
 export const PF_INCREASE = 20; // Percentage to increase above the current priority fee
 export const MAX_RETRIES = 15; // Number of times to try sending a transaction
 export const MAX_RETRIES_REFUND = 8; // Number of times to try sending the refund transaction
+
+export const THREADS_COUNT = 2; // Max simultaneous threads for processing of accounts

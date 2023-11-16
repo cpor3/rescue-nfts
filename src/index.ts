@@ -1,40 +1,21 @@
-import { Account } from "./accounts/types";
+import { Account } from "./db/types";
+import { THREADS_COUNT } from "./constants";
 import { FireblocksApi } from "./fireblocksApi";
 import { Worker } from 'worker_threads';
-import path, { resolve } from 'path';
-import fs from 'fs';
-import { ProcessConfig } from "./process";
+import { ProcessConfig } from "./workers/process";
+import { WorkerResponse } from "./workers/types";
+import { dLogger } from './logger';
+import { DB } from './db';
+import { config } from 'dotenv';
+config();
 
-export async function loadAccounts(): Promise<Account[]> {
-    try {
-        const accounts: Account[] = JSON.parse(fs.readFileSync(path.resolve('./src/accounts/accounts.json'), 'utf-8'));
-        return accounts;
-    } catch (error) {
-        console.log('Error while trying to read from accounts.json: ', error)
-        return [];
-    }
-}
-
-export async function saveAccounts(accounts: Account[]): Promise<boolean> {
-    try {
-        const accountsStringified = JSON.stringify(accounts);
-        fs.writeFileSync(path.resolve('./src/accounts/accounts.json'), accountsStringified, 'utf-8');
-        return true;
-    } catch (error) {
-        console.log('Error while trying to save data to accounts.json: ', error)
-        return false;
-    }
-}
-
-type WorkerResponse = {
-    account: string,
-    completed?: boolean,
-    error?: string
-}
+const db = new DB({
+    connectionString: process.env.DB_CONNECTION_STRING
+});
 
 async function createWorker(config: ProcessConfig, account: Account): Promise<WorkerResponse> {
     return new Promise((resolve, reject) => {
-        const worker = new Worker('./dist/src/process.js', {
+        const worker = new Worker('./dist/src/workers/process.js', {
             workerData: {
                 config,
                 account
@@ -57,37 +38,61 @@ async function createWorker(config: ProcessConfig, account: Account): Promise<Wo
 }
 
 async function main() {
-    const accounts = await loadAccounts();
-    const processes = [];
-    for (let i=0; i<accounts.length; i++) {
-        if (accounts[i].status !== 'completed') {
+    dLogger.info('MAIN', `°°*** Initializing ***°°`);
+    let pendingAccounts = await db.readPending();
+    
+    while (pendingAccounts.length) {
+        const processes = [];
+        dLogger.info('MAIN', `>>> Looping: There are ${pendingAccounts.length} pending accounts to be processed.`);
+
+        for (let i=0; (i<pendingAccounts.length && i<THREADS_COUNT); i++) {
+            // create FB vault if needed <---
             processes.push(createWorker({
                 readOnly: false,
                 safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
-                compromisedWalletPrivateKey: accounts[i].privateKey,
-                toWalletAddress: accounts[i].newAddress,
-            }, accounts[i]));
+                compromisedWalletPrivateKey: pendingAccounts[i].privateKey,
+                toWalletAddress: pendingAccounts[i].newAddress,
+            }, pendingAccounts[i]));
         }
+        const promisesResults = await Promise.allSettled(processes);
+
+        for (let i=0; i<promisesResults.length; i++) {
+            if (promisesResults[i].status === 'fulfilled') {
+                const fulfilledResult = promisesResults[i] as PromiseFulfilledResult<WorkerResponse> ;
+                if (fulfilledResult.value.completed) {
+                    await db.update(fulfilledResult.value.account, {
+                        status: 'completed'
+                    });
+                }
+            } else {
+                const rejectedResult = promisesResults[i] as PromiseRejectedResult;
+                dLogger.error('MAIN', `Error while processing account: ${JSON.stringify(rejectedResult.reason)}`);
+            }
+        }
+        pendingAccounts = await db.readPending();
     }
-    const results = await Promise.all(processes);
-    console.log(results);
+
+    dLogger.info('MAIN', `All accounts processed!`);
 }
 main();
 
-async function createFireblocksVaultAndAsset() {
+async function createFireblocksVaultAndAsset(vaultName: string, originalAddress: string): Promise<string> {
     const fb = new FireblocksApi();
 
-    const newVault = await fb.createVault('Karmaverse-8', false, '0x5fa1e533a75d931517f86e1193857497d11e37ae', true);
+    const newVault = await fb.createVault(vaultName, false, originalAddress, true);
     if (!newVault) {
-        console.log('Error creating Vault');
-        return;
+        dLogger.error('FB:createVault', 'Error creating Vault');
+        return '';
     }
-    // console.log(newVault);
 
     const newAsset = await fb.createAsset(newVault.id, 'MATIC_POLYGON');
-    console.log(newAsset.address);
+    if (!newAsset) {
+        dLogger.error('FB:createAsset', 'Error creating MATIC wallet in the Vault');
+        return '';
+    }
+
+    return newAsset.address;
 }
-// createFireblocksVaultAndAsset();
 
 //// Execute all
 // processAccount({

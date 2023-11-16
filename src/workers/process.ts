@@ -1,17 +1,15 @@
 import { InfuraProvider, Wallet, Contract, formatEther, formatUnits, BaseContractMethod, TransactionResponse } from 'ethers';
-import KnotContract from './contracts/knotContract.json';
-import SerumContract from './contracts/serumContract.json';
-import KzKnotContract from './contracts/kzKnotContract.json';
-import KzFighterContract from './contracts/kzFighterContract.json';
-import { MAX_RETRIES, MAX_RETRIES_REFUND, PF_INCREASE } from './constants';
-import { sleep, estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, sendFunds, getCurrentMaxPriorityFee, getCurrentBaseFee } from './utils';
-import { KzApi } from "./kzApi";
+import KnotContract from '../contracts/knotContract.json';
+import SerumContract from '../contracts/serumContract.json';
+import KzKnotContract from '../contracts/kzKnotContract.json';
+import KzFighterContract from '../contracts/kzFighterContract.json';
+import { MAX_RETRIES, MAX_RETRIES_REFUND, PF_INCREASE } from '../constants';
+import { sleep, estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, sendFunds, getCurrentMaxPriorityFee, getCurrentBaseFee } from '../utils';
+import { KzApi } from "../kzApi";
 import { config } from 'dotenv';
-import { PreClaimFighters } from './kzApi/types';
-import { Account } from './accounts/types';
+import { PreClaimFighters } from '../kzApi/types';
 import { parentPort, workerData } from 'worker_threads';
-import { saveAccounts } from './';
-import { dLogger } from './logger';
+import { dLogger } from '../logger';
 config();
 
 const cconsole = {
