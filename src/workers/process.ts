@@ -3,8 +3,8 @@ import KnotContract from '../contracts/knotContract.json';
 import SerumContract from '../contracts/serumContract.json';
 import KzKnotContract from '../contracts/kzKnotContract.json';
 import KzFighterContract from '../contracts/kzFighterContract.json';
-import { MAX_RETRIES, MAX_RETRIES_REFUND, PF_INCREASE } from '../constants';
-import { sleep, estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, sendFunds, getCurrentMaxPriorityFee, getCurrentBaseFee } from '../utils';
+import { MAX_RETRIES, MAX_RETRIES_REFUND, PF_INCREASE, WAIT_FOR_KNOTS_API } from '../constants';
+import { sleep, estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, getCurrentMaxPriorityFee, getCurrentBaseFee, sendFunds } from '../utils';
 import { KzApi } from "../kzApi";
 import { config } from 'dotenv';
 import { PreClaimFighters } from '../kzApi/types';
@@ -23,6 +23,7 @@ export type ProcessConfig = {
     safeWalletPrivateKey: string, 
     compromisedWalletPrivateKey: string,
     toWalletAddress?: string,
+    knotsDestination?: string,
     claimSerum?: boolean,
     claimFighters?: boolean,
     verifyKnots?: boolean,
@@ -52,9 +53,10 @@ async function processAccount(config: ProcessConfig) {
     } = await getContracts(safeWalletPrivateKey, compromisedWalletPrivateKey);
 
     const toWalletAddress = config.toWalletAddress ?? safeWallet.address;
+    const knotsToWalletAddress = config.knotsDestination ?? toWalletAddress;
 
     const api = new KzApi(compromisedWallet.address);
-    
+
     const accountOk = await api.initialize(compromisedWallet);
     if (!accountOk) {
         cconsole.log('Account doesn\'t exist, is locked, or invalid tokens set for Kz API.');
@@ -76,25 +78,28 @@ async function processAccount(config: ProcessConfig) {
     cconsole.log(`In-game Knots: ${formatEther(inGameKnots)}`);
     cconsole.log(`In-game Serum: ${inGameSerum}`);
     cconsole.log(`In-game Figthers (${inGameFighters?.length || 0}): ${inGameFighters?.join(',') || ''}`);
-    cconsole.log(`Fighters in wallet: ${fighters.length ? fighters?.map(fighter => fighter.tokenId).join(',') : 0}`);
+    cconsole.log(`Fighters in wallet (${fighters.length}): ${fighters?.map(fighter => fighter.tokenId).join(',') || ''}`);
   
-    // Check if processing of the account is done:
-    if (
-        serumBalance === 0 && // no serum on wallet
-        !fighters?.length && // no fighters on wallet
-        BigInt(inGameKnots) < BigInt(10*1e18) && // less than 10 in-game knots
-        (inGameSerum <= 100 || (inGameSerum > 100 && !inGameFighters?.length)) && // minimum qty of Serum allowed to transfer is 100, fighters required to withdraw serum
-        !inGameFighters?.length // no in-game fighers
-    ) {
-        cconsole.log('Account successfully processed.');
-        endProcess(true);
-    }
-
     if (readOnly) {
         cconsole.log('Read only mode. Exiting.');
         return endProcess(false);
     }
     
+    // Check if processing of the account is done:
+    if (
+        serumBalance === 0 && // no serum on wallet
+        !fighters?.length && // no fighters on wallet
+        // BigInt(inGameKnots) < BigInt(10*1e18) && // less than 10 in-game knots
+        (inGameSerum <= 100 || (inGameSerum > 100 && !inGameFighters?.length)) && // minimum qty of Serum allowed to transfer is 100, fighters required to withdraw serum
+        !inGameFighters?.length // no in-game fighers
+    ) {
+        // Return funds (if any)
+        await returnUnusedFunds(safeWallet, compromisedWallet);    
+        
+        cconsole.log('Account successfully processed.');
+        endProcess(true);
+    }
+
     // Claim Serum (the minimum allowed claim qty is 100)
     let serumNetAmount = 0;
     if (claimSerum && inGameSerum >= 100) {
@@ -173,7 +178,7 @@ async function processAccount(config: ProcessConfig) {
         }    
         cconsole.log(`Deposit OK: ${depositKnots.txn?.hash}`);
         cconsole.log('Giving some time to the API to register the deposited knots...');
-        await sleep(6000);
+        await sleep(WAIT_FOR_KNOTS_API);
     }
 
     cconsole.log('');
@@ -211,6 +216,7 @@ async function processAccount(config: ProcessConfig) {
             timestamp, 
             signature
         ]);
+        if (!claimFighters.success) tokenIds = undefined;
         if (claimFighters.success) cconsole.log(`Claim OK: ${claimFighters.txn?.hash}`);
     }
 
@@ -288,22 +294,27 @@ async function execute(
     // cconsole.log('Priority fee per gas: ', formatEther(priorityFee), 'MATIC');
     // cconsole.log('Total gas required: ', formatEther(gasRequired), 'MATIC');
 
+    let fundsSentError = false;
     cconsole.log('Sending MATIC from safe wallet...');
-    sendFunds(safeWallet, compromisedWallet, provider, gasRequired)
-        .catch(error => cconsole.log(`Error while trying to send MATIC from safe wallet: ${error.shortMessage ?? error}`));
+    const nonce = await getNonce();
+    sendFunds(safeWallet, compromisedWallet, gasRequired, nonce)
+        .catch((error: any) => {
+            fundsSentError = true;
+            cconsole.log(`Error while trying to send MATIC from safe wallet: ${error.shortMessage ?? error}`);
+        });
 
     // Execute transaction
     let txn: TransactionResponse | null = null;
     let retry = 0;
     let success = false;
-    while (!success && retry < maxRetries) {
+    while (!success && retry < maxRetries && !fundsSentError) {
         try {
             txn = await contractMethod(...args, {
                 gasLimit: estimatedGasUnitsPlus10perc,
                 maxFeePerGas: (currentBaseFee * BigInt(2)) + priorityFee,
                 maxPriorityFeePerGas: priorityFee,
             });
-            await txn?.wait();
+            await txn?.wait(1, 60000);
             success = true;
         } catch (error: any) {
             cconsole.log(`Failed (try ${retry+1} of ${maxRetries}): ${error?.shortMessage ?? error}`);
@@ -311,7 +322,7 @@ async function execute(
         }
     }
 
-    if (!success) cconsole.log(`Couldn\'t send trasaction after ${maxRetries} tries!`);
+    if (!success) cconsole.log(`Couldn\'t send trasaction after ${retry} tries!`);
 
     return {
         success,
@@ -332,7 +343,7 @@ async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, 
     const currentPriorityFeePlus20perc = (await getCurrentMaxPriorityFee(provider)) * BigInt(120) / BigInt(100);
     const estimatedFee = estimatedGasUnitsPlus10perc * (currentGasPricePlus10perc + currentPriorityFeePlus20perc);
     const availableFunds = balance - estimatedFee;
-    if (availableFunds < 0) {
+    if (availableFunds <= 0) {
         cconsole.log('No available funds.');
         return {
             success: false,
@@ -390,7 +401,20 @@ async function transferNfts(safeWallet: Wallet, compromisedWallet: Wallet, toWal
 }
 
 function endProcess(accountProcessCompleted: boolean) {
-    parentPort?.postMessage(accountProcessCompleted);
+    parentPort?.postMessage(accountProcessCompleted ? 'accountCompleted' : 'accountNotCompleted');
+}
+
+async function getNonce(): Promise<number> {
+    return new Promise(async (resolve, reject) => {
+        let done = false;
+        parentPort?.on('message', value => {
+            done = true;
+            resolve(value);
+        })
+        parentPort?.postMessage('getNonce');
+        while (!done) await sleep(1000);
+        parentPort?.removeAllListeners('message');
+    });
 }
 
 processAccount(workerData.config);

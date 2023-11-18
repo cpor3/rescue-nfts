@@ -21,7 +21,7 @@ export class DB {
 
     async readPending(): Promise<Account[]> {
         try {
-            const result = await this.client.query<Account>(`SELECT * FROM accounts WHERE status != 'completed'`);
+            const result = await this.client.query<Account>(`SELECT * FROM accounts WHERE status = 'pending'`);
             return result.rows.map(row => this.buildResponse(row));
         } catch (error) {
             dLogger.error('DB:readPending', `Error while trying to read: ${error}`);
@@ -37,7 +37,17 @@ export class DB {
             dLogger.error('DB:readByAccount', `Error while trying to read: ${error}`);
             return [];
         }
+    }
+
+    async getCurrentVaultId(): Promise<number> {
+        try {
+            const result = await this.client.query<{current_vault_id: number}>(`SELECT MAX(vault_id) AS current_vault_id FROM accounts`);
+            return result.rows[0].current_vault_id;
+        } catch (error) {
+            dLogger.error('DB:getCurrentVaultId', `Error while trying to read: ${error}`);
+            return 0;
         }
+    }
 
     async update(address: string, data: Partial<Account>) {
         try {
@@ -48,6 +58,7 @@ export class DB {
                     ${data?.privateKey ? `private_key='${data?.privateKey}', ` : ''}
                     ${data?.newAddress ? `new_address='${data?.newAddress}', ` : ''}
                     ${data?.fireblocksVault ? `fireblocks_vault='${data?.fireblocksVault}', ` : ''}
+                    ${data?.vaultId ? `vault_id='${data?.vaultId}', ` : ''}
                     ${data?.status ? `status='${data?.status}', ` : ''}
                     ${`updated_at='${(new Date()).toISOString()}'`}    
                 WHERE address = '${address}'
@@ -64,8 +75,9 @@ export class DB {
         try {
             const result = await this.client.query<Account>(`
                 INSERT INTO accounts 
-                (address, private_key, new_address, fireblocks_vault, status, updated_at)
-                VALUES ('${data.address}', '${data.privateKey}', '${data.newAddress}', '${data.fireblocksVault}', '${data.status}', '${(new Date()).toISOString()}')`
+                (address, private_key, new_address, fireblocks_vault, vault_id, status, updated_at)
+                VALUES ('${data.address}', '${data.privateKey}', '${data.newAddress}', '${data.fireblocksVault}', 
+                    '${data.vaultId}', '${data.status}', '${(new Date()).toISOString()}')`
             );
             return result.rows.map(row => this.buildResponse(row));
         } catch (error) {
@@ -84,6 +96,7 @@ export class DB {
             privateKey: accountRecord.private_key,
             newAddress: accountRecord.new_address,
             fireblocksVault: accountRecord.fireblocks_vault,
+            vaultId: accountRecord.vault_id,
             status: accountRecord.status,
             updatedAt: accountRecord.updated_at
         }

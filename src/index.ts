@@ -7,52 +7,105 @@ import { WorkerResponse } from "./workers/types";
 import { dLogger } from './logger';
 import { DB } from './db';
 import { config } from 'dotenv';
+import { Treasury } from "./utils";
+import { InfuraProvider } from "ethers";
 config();
 
-const db = new DB({
-    connectionString: process.env.DB_CONNECTION_STRING
-});
-
-async function createWorker(config: ProcessConfig, account: Account): Promise<WorkerResponse> {
-    return new Promise((resolve, reject) => {
-        const worker = new Worker('./dist/src/workers/process.js', {
-            workerData: {
-                config,
-                account
-            },
-            stdout: false
-        });
-        worker.on('message', accountIsCompleted => {
-            resolve({
-                account: account.address,
-                completed: accountIsCompleted
-            });
-        });
-        worker.on('error', error => {
-            reject({
-                account: account.address,
-                error: error
-            });
-        });
-    });
-}
-
 async function main() {
-    dLogger.info('MAIN', `°°*** Initializing ***°°`);
-    let pendingAccounts = await db.readPending();
+    const provider = new InfuraProvider("matic");
+    const treasury = Treasury.getInstance(provider, process.env.SAFE_WALLET_WALLET!);
+    const db = new DB({
+        connectionString: process.env.DB_CONNECTION_STRING
+    });
+
+    const getNonce = async () => {
+        return await treasury.getNonce();
+    }
+
+    async function createWorker(config: ProcessConfig, account: Account): Promise<WorkerResponse> {
+        return new Promise((resolve, reject) => {
+            const worker = new Worker('./dist/src/workers/process.js', {
+                workerData: {
+                    config,
+                    account
+                },
+                stdout: false
+            });
+            worker.on('message', async (message: string) => {
+                switch (message) {
+                    case 'accountCompleted':
+                    case 'accountNotCompleted':
+                        resolve({
+                            account: account.address,
+                            completed: message === 'accountCompleted'
+                        });
+                        break;
+                    case 'getNonce':
+                        const nonce = await getNonce();
+                        worker.postMessage(nonce);
+                        break;
+                    default:
+                        break;
+                }
+            });
+            worker.on('error', error => {
+                reject({
+                    account: account.address,
+                    error: error
+                });
+            });
+        });
+    }
+
+    const createFireblocksVaultAndAsset = async(vaultName: string, originalAddress: string): Promise<string> => {
+        const newVault = await fb.createVault(vaultName, false, originalAddress, true);
+        if (!newVault) {
+            dLogger.error('FB:createVault', 'Error creating Vault');
+            return '';
+        }
+
+        const newAsset = await fb.createAsset(newVault.id, 'MATIC_POLYGON');
+        if (!newAsset) {
+            dLogger.error('FB:createAsset', 'Error creating MATIC wallet in the Vault');
+            return '';
+        }
+
+        return newAsset.address;
+    }
     
+    const fb = new FireblocksApi;
+    let currentVaultId: number;
+    let pendingAccounts = await db.readPending();
+
     while (pendingAccounts.length) {
-        const processes = [];
         dLogger.info('MAIN', `>>> Looping: There are ${pendingAccounts.length} pending accounts to be processed.`);
+        const processes = [];
+        currentVaultId = await db.getCurrentVaultId();
 
         for (let i=0; (i<pendingAccounts.length && i<THREADS_COUNT); i++) {
-            // create FB vault if needed <---
-            processes.push(createWorker({
+            // Create FB vault if needed
+            if (!pendingAccounts[i].fireblocksVault) {
+                currentVaultId++;
+                dLogger.info('MAIN', `Creating new wallet on Fireblocks (vaultId: ${currentVaultId})...`);
+                const newWallet = await createFireblocksVaultAndAsset(`Karmaverse-${currentVaultId}`, pendingAccounts[i].address);
+                if (!newWallet) dLogger.error('MAIN', 'Error while trying to create FB wallet');
+                pendingAccounts[i].fireblocksVault = `Karmaverse-${currentVaultId}`;
+                pendingAccounts[i].vaultId = currentVaultId;
+                db.update(pendingAccounts[i].address, {
+                    newAddress: newWallet,
+                    fireblocksVault: `Karmaverse-${currentVaultId}`,
+                    vaultId: currentVaultId
+                })
+            }
+            // Dispatch thread
+            const config = {
                 readOnly: false,
                 safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
                 compromisedWalletPrivateKey: pendingAccounts[i].privateKey,
                 toWalletAddress: pendingAccounts[i].newAddress,
-            }, pendingAccounts[i]));
+                knotsDestination: process.env.KNOTS_RECEPTION_WALLET,
+            };
+            processes.push(createWorker(config, pendingAccounts[i]));
         }
         const promisesResults = await Promise.allSettled(processes);
 
@@ -66,7 +119,7 @@ async function main() {
                 }
             } else {
                 const rejectedResult = promisesResults[i] as PromiseRejectedResult;
-                dLogger.error('MAIN', `Error while processing account: ${JSON.stringify(rejectedResult.reason)}`);
+                dLogger.error('MAIN', `Error while processing account: ${JSON.stringify(rejectedResult)}`);
             }
         }
         pendingAccounts = await db.readPending();
@@ -74,72 +127,5 @@ async function main() {
 
     dLogger.info('MAIN', `All accounts processed!`);
 }
+
 main();
-
-async function createFireblocksVaultAndAsset(vaultName: string, originalAddress: string): Promise<string> {
-    const fb = new FireblocksApi();
-
-    const newVault = await fb.createVault(vaultName, false, originalAddress, true);
-    if (!newVault) {
-        dLogger.error('FB:createVault', 'Error creating Vault');
-        return '';
-    }
-
-    const newAsset = await fb.createAsset(newVault.id, 'MATIC_POLYGON');
-    if (!newAsset) {
-        dLogger.error('FB:createAsset', 'Error creating MATIC wallet in the Vault');
-        return '';
-    }
-
-    return newAsset.address;
-}
-
-//// Execute all
-// processAccount({
-//     readOnly: false,
-//     safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
-//     compromisedWalletPrivateKey: process.env.COMPROMISED_WALLET_PK!,
-//     toWalletAddress: process.env.FIREBLOCKS_SAFE_WALLET!,
-//     claimFighters: true,
-//     verifyKnots: true,
-// });
-
-//// Manual pre-claim input
-// processAccount({
-//     safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
-//     compromisedWalletPrivateKey: process.env.COMPROMISED_WALLET_PK!,
-//     toWalletAddress: process.env.FIREBLOCKS_SAFE_WALLET!,
-//     verifyKnots: false,
-//     manualPreClaimInput: {
-//         success: true,
-//         txId: "1008280781772079104",
-//         timestamp: 1699628217,
-//         signature: "0x2cfd6e9a30e6d5d372c6ae2134f1defb4f6ebdebf5a21899c4b4bd66c4449026417bf904e783154922428148e3e101f2544ee931ae9460ebab263d7f4190c39f1c",
-//         tokenIds: [
-//             21747, 21748,
-//             21749, 21751,
-//             21752, 21753,
-//             23356, 21501,
-//             33535
-//         ],
-//     }
-// });
-
-//// Manual NFTs input
-// processAccount({
-//     safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
-//     compromisedWalletPrivateKey: process.env.COMPROMISED_WALLET_PK!,
-//     toWalletAddress: process.env.FIREBLOCKS_SAFE_WALLET!,
-//     verifyKnots: false,
-//     manualTokenIds: [
-//         21510, 21509
-//     ]
-// });
-
-//// Transfer NFTs, get list from API
-// processAccount({
-//     safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
-//     compromisedWalletPrivateKey: process.env.COMPROMISED_WALLET_PK!,
-//     toWalletAddress: process.env.FIREBLOCKS_SAFE_WALLET!,
-//     verifyKnots: false
-// });
