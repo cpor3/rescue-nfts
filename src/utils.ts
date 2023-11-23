@@ -45,7 +45,7 @@ export async function estimateGasForContractMethod(contractMethod: BaseContractM
 
 export class Treasury {
     private static instance: Treasury;
-    private currentNonce: number | undefined = undefined;
+    private static currentNonce: number | undefined = undefined;
     provider: InfuraProvider;
     safeWalletAddress: string;
 
@@ -62,14 +62,13 @@ export class Treasury {
     }
 
     async getNonce(): Promise<number> {
-        if (this.currentNonce === undefined) this.currentNonce = (await this.provider.getTransactionCount(this.safeWalletAddress)) - 1;
-        this.currentNonce++;
-        return this.currentNonce;
+        if (Treasury.currentNonce === undefined) Treasury.currentNonce = (await this.provider.getTransactionCount(this.safeWalletAddress)) - 1;
+        Treasury.currentNonce++;
+        return Treasury.currentNonce;
     }
 }
 
 export async function sendFunds(safeWallet: Wallet, compromisedWallet: Wallet, valueToSend: bigint, nonce: number): Promise<TransactionResponse | null> {
-    console.log(`Sending funds to ${compromisedWallet.address}. Nonce: ${nonce}`);
     const txnData = {
         to: compromisedWallet.address,
         gasLimit: 21000,

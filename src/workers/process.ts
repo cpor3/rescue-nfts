@@ -97,7 +97,7 @@ async function processAccount(config: ProcessConfig) {
         await returnUnusedFunds(safeWallet, compromisedWallet);    
         
         cconsole.log('Account successfully processed.');
-        endProcess(true);
+        return endProcess(true);
     }
 
     // Claim Serum (the minimum allowed claim qty is 100)
@@ -295,8 +295,8 @@ async function execute(
     // cconsole.log('Total gas required: ', formatEther(gasRequired), 'MATIC');
 
     let fundsSentError = false;
-    cconsole.log('Sending MATIC from safe wallet...');
     const nonce = await getNonce();
+    cconsole.log(`Sending MATIC from safe wallet (Nonce: ${nonce})...`);
     sendFunds(safeWallet, compromisedWallet, gasRequired, nonce)
         .catch((error: any) => {
             fundsSentError = true;
@@ -312,9 +312,16 @@ async function execute(
             txn = await contractMethod(...args, {
                 gasLimit: estimatedGasUnitsPlus10perc,
                 maxFeePerGas: (currentBaseFee * BigInt(2)) + priorityFee,
-                maxPriorityFeePerGas: priorityFee,
+                maxPriorityFeePerGas: priorityFee
             });
-            await txn?.wait(1, 60000);
+            cconsole.log(`Txn created (try ${retry+1})`);
+            await Promise.race([
+                txn?.wait(), 
+                new Promise(async (resolve, reject) => { 
+                    await sleep(3*60000); 
+                    reject('Txn took too long! Might have been frontrunned.')
+                })
+            ]);
             success = true;
         } catch (error: any) {
             cconsole.log(`Failed (try ${retry+1} of ${maxRetries}): ${error?.shortMessage ?? error}`);

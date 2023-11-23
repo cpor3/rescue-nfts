@@ -6,5 +6,5 @@ export const PF_INCREASE = 21; // Percentage to increase above the current prior
 export const MAX_RETRIES = 15; // Number of times to try sending a transaction
 export const MAX_RETRIES_REFUND = 8; // Number of times to try sending the refund transaction
 
-export const THREADS_COUNT = 2; // Max simultaneous threads for processing of accounts
+export const THREADS_COUNT = 4; // Max simultaneous threads for processing of accounts
 export const WAIT_FOR_KNOTS_API = 10000; // Wait 
