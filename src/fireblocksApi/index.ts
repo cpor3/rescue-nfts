@@ -28,6 +28,16 @@ export class FireblocksApi {
         const response = await this.sdk.createVaultAsset(vaultId, assetId, options);
         return response;
     }
+
+    async getGasStationSettings(asset?: string) {
+        const response = await this.sdk.getGasStationInfo(asset ?? 'MATIC_POLYGON');
+        return response;
+    }
+
+    async setGasStationSettings(min: string, max: string, maxGasPrice?: string, asset?: string) {
+        const response = await this.sdk.setGasStationConfiguration(min, max, maxGasPrice, asset ?? 'MATIC_POLYGON');
+        return response;
+    }
 }
 
 async function runSafely(callback: (...args: any) => any, errorMessage: string) {

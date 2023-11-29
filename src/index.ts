@@ -1,5 +1,5 @@
 import { Account } from "./db/types";
-import { THREADS_COUNT } from "./constants";
+import { READ_ONLY, THREADS_COUNT } from "./constants";
 import { FireblocksApi } from "./fireblocksApi";
 import { Worker } from 'worker_threads';
 import { ProcessConfig } from "./workers/process";
@@ -88,22 +88,24 @@ async function main() {
                 currentVaultId++;
                 dLogger.info('MAIN', `Creating new wallet on Fireblocks (vaultId: ${currentVaultId})...`);
                 const newWallet = await createFireblocksVaultAndAsset(`Karmaverse-${currentVaultId}`, pendingAccounts[i].address);
-                if (!newWallet) dLogger.error('MAIN', 'Error while trying to create FB wallet');
-                pendingAccounts[i].fireblocksVault = `Karmaverse-${currentVaultId}`;
+                if (!newWallet) throw new Error('MAIN: Error while trying to create FB wallet');
+                pendingAccounts[i].newAddress = newWallet;
                 pendingAccounts[i].vaultId = currentVaultId;
+                pendingAccounts[i].fireblocksVault = `Karmaverse-${currentVaultId}`;
                 db.update(pendingAccounts[i].address, {
                     newAddress: newWallet,
-                    fireblocksVault: `Karmaverse-${currentVaultId}`,
-                    vaultId: currentVaultId
+                    vaultId: currentVaultId,
+                    fireblocksVault: `Karmaverse-${currentVaultId}`
                 })
             }
             // Dispatch thread
-            const config = {
-                readOnly: false,
+            const config: ProcessConfig = {
+                readOnly: READ_ONLY ?? true,
                 safeWalletPrivateKey: process.env.SAFE_WALLET_PK!,
                 compromisedWalletPrivateKey: pendingAccounts[i].privateKey,
                 toWalletAddress: pendingAccounts[i].newAddress,
                 knotsDestination: process.env.KNOTS_RECEPTION_WALLET,
+                claimSerum: true
             };
             processes.push(createWorker(config, pendingAccounts[i]));
         }

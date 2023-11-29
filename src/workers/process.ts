@@ -3,6 +3,7 @@ import KnotContract from '../contracts/knotContract.json';
 import SerumContract from '../contracts/serumContract.json';
 import KzKnotContract from '../contracts/kzKnotContract.json';
 import KzFighterContract from '../contracts/kzFighterContract.json';
+import TransferHelperContract from '../contracts/transferHelperContract.json';
 import { MAX_RETRIES, MAX_RETRIES_REFUND, PF_INCREASE, WAIT_FOR_KNOTS_API } from '../constants';
 import { sleep, estimateGasForTransaction, estimateGasForContractMethod, getCurrentGasPrice, getCurrentMaxPriorityFee, getCurrentBaseFee, sendFunds } from '../utils';
 import { KzApi } from "../kzApi";
@@ -49,7 +50,8 @@ async function processAccount(config: ProcessConfig) {
         knotContract, 
         serumContract, 
         kzKnotContract,
-        kzFighterContract
+        kzFighterContract,
+        transferHelperContract
     } = await getContracts(safeWalletPrivateKey, compromisedWalletPrivateKey);
 
     const toWalletAddress = config.toWalletAddress ?? safeWallet.address;
@@ -218,6 +220,7 @@ async function processAccount(config: ProcessConfig) {
         ]);
         if (!claimFighters.success) tokenIds = undefined;
         if (claimFighters.success) cconsole.log(`Claim OK: ${claimFighters.txn?.hash}`);
+        await returnUnusedFunds(safeWallet, compromisedWallet);
     }
 
     if (!tokenIds) {
@@ -240,9 +243,10 @@ async function processAccount(config: ProcessConfig) {
     // Transfer NFTs to a safe wallet (if any)
     if (tokenIds?.length) {
         cconsole.log('Trying to transfer Nfts...')
-        const nfts = await transferNfts(safeWallet, compromisedWallet, toWalletAddress, tokenIds!, kzFighterContract);
+        const nfts = await transferNftsBatch(safeWallet, compromisedWallet, toWalletAddress, tokenIds!, kzFighterContract, transferHelperContract);
+        // const nfts = await transferNfts(safeWallet, compromisedWallet, toWalletAddress, tokenIds!, kzFighterContract);
         if (nfts.success) cconsole.log('Transfer OK: all tokens transferred');
-        if (!nfts.success) cconsole.log(`Transfer Failed: only transferred ${nfts.tokensTransferred.length} out of ${tokenIds.length}.`);
+        if (!nfts.success) cconsole.log(`Transfer Failed: only transferred ${nfts.tokensTransferred?.length ?? 0} out of ${tokenIds.length}.`);
     }
 
     // Return funds (if any)
@@ -258,6 +262,7 @@ async function getContracts(safeWalletPrivateKey: string, compromisedWalletPriva
     const serumContract = new Contract(SerumContract.address, SerumContract.abi, compromisedWallet);
     const kzKnotContract = new Contract(KzKnotContract.address, KzKnotContract.abi, compromisedWallet);
     const kzFighterContract = new Contract(KzFighterContract.address, KzFighterContract.abi, compromisedWallet);
+    const transferHelperContract = new Contract(TransferHelperContract.address, TransferHelperContract.abi, compromisedWallet);
 
     return {
         safeWallet, 
@@ -265,7 +270,8 @@ async function getContracts(safeWalletPrivateKey: string, compromisedWalletPriva
         knotContract, 
         serumContract, 
         kzKnotContract,
-        kzFighterContract
+        kzFighterContract,
+        transferHelperContract,
     };
 }
 
@@ -338,18 +344,13 @@ async function execute(
 }
 
 async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, maxRetries = MAX_RETRIES_REFUND) {
-    cconsole.log('Returning funds from compromised wallet');
-    const txnData: any = {
-        to: safeWallet.address,
-        gasLimit: 21000,
-        value: BigInt(1) // sample value of 1 wei for estimating gas only
-    };
+    cconsole.log('Returning funds from compromised wallet...');
     const balance = await provider.getBalance(compromisedWallet.address);
-    const estimatedGasUnitsPlus10perc = (await estimateGasForTransaction(compromisedWallet, txnData)) * BigInt(110) / BigInt(100);
-    const currentGasPricePlus10perc = (await getCurrentGasPrice(provider)) * BigInt(110) / BigInt(100);
+    const currentGasPricePlus20perc = (await getCurrentGasPrice(provider)) * BigInt(120) / BigInt(100);
     const currentPriorityFeePlus20perc = (await getCurrentMaxPriorityFee(provider)) * BigInt(120) / BigInt(100);
-    const estimatedFee = estimatedGasUnitsPlus10perc * (currentGasPricePlus10perc + currentPriorityFeePlus20perc);
+    const estimatedFee = BigInt(21000) * (currentGasPricePlus20perc + currentPriorityFeePlus20perc);
     const availableFunds = balance - estimatedFee;
+
     if (availableFunds <= 0) {
         cconsole.log('No available funds.');
         return {
@@ -357,11 +358,18 @@ async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, 
             txn: null
         };
     }
-    txnData.value = availableFunds;
-    txnData.maxPriorityFeePerGas = currentPriorityFeePlus20perc;
-    cconsole.log(`Current Balance: ${formatEther(balance)} MATIC`);
-    cconsole.log(`Estimated Fee (+10%): ${formatEther(estimatedFee)} MATIC`);
-    cconsole.log(`Available funds to transfer: ${formatEther(availableFunds)} MATIC`);
+
+    const txnData: any = {
+        to: safeWallet.address,
+        gasLimit: 21000,
+        value: availableFunds,
+        maxFeePerGas: currentGasPricePlus20perc + currentPriorityFeePlus20perc,
+        maxPriorityFeePerGas: currentPriorityFeePlus20perc
+    };
+
+    // cconsole.log(`Current Balance: ${formatEther(balance)} MATIC`);
+    // cconsole.log(`Estimated Fee (+10%): ${formatEther(estimatedFee)} MATIC`);
+    // cconsole.log(`Available funds to transfer: ${formatEther(availableFunds)} MATIC`);
 
     let txn: TransactionResponse | null = null;
     let retry = 0;
@@ -387,7 +395,7 @@ async function returnUnusedFunds(safeWallet: Wallet, compromisedWallet: Wallet, 
 
 async function transferNfts(safeWallet: Wallet, compromisedWallet: Wallet, toWalletAddress: string, tokenIds: Array<number>, kzFighterContract: Contract) {
     let success = true;
-    let tokensTransferred= [];
+    let tokensTransferred = [];
     for (let i=0; i<tokenIds.length; i++) {
         const transferNfts = await execute(safeWallet, compromisedWallet, kzFighterContract.transferFrom, [
             compromisedWallet.address,
@@ -404,6 +412,51 @@ async function transferNfts(safeWallet: Wallet, compromisedWallet: Wallet, toWal
     return {
         success,
         tokensTransferred
+    }
+}
+
+async function transferNftsBatch(
+    safeWallet: Wallet,
+    compromisedWallet: Wallet,
+    toWalletAddress: string,
+    tokenIds: Array<number>,
+    kzFighterContract: Contract,
+    transferHelperContract: Contract
+) {
+    const isApproved = await kzFighterContract.isApprovedForAll(compromisedWallet.address, TransferHelperContract.address);
+    if (!isApproved) {
+        cconsole.log(`Trying to approve allowance for Transfer Helper contract...`);
+        const approveContract = await execute(safeWallet, compromisedWallet, kzFighterContract.setApprovalForAll, [
+            TransferHelperContract.address,
+            true
+        ]);
+        if (!approveContract.success) {
+            cconsole.log(`Error while trying to approve allowance for Transfer Helper contract`);
+            return {
+                succes: false,
+                tokensTransferred: null
+            }
+        }
+    }
+        
+    const transferNfts = await execute(safeWallet, compromisedWallet, transferHelperContract.erc721BatchTransfer, [
+        KzFighterContract.address,
+        toWalletAddress,
+        tokenIds
+    ]);
+    if (!transferNfts.success) {
+        cconsole.log(`Error while trying to send NFTs batch`);
+        return {
+            succes: false,
+            tokensTransferred: null
+        }            
+    }
+    
+    cconsole.log(`Transfer of NFTs Batch OK!: ${transferNfts.txn?.hash}`);
+    
+    return {
+        success: true,
+        tokensTransferred: tokenIds
     }
 }
 
