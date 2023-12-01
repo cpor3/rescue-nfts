@@ -2,6 +2,7 @@ node_modules/
 .env
 accounts.json
 old/
+keys_backup/
 *.key
 *.csr
 dist/

@@ -105,7 +105,6 @@ async function main() {
                 compromisedWalletPrivateKey: pendingAccounts[i].privateKey,
                 toWalletAddress: pendingAccounts[i].newAddress,
                 knotsDestination: process.env.KNOTS_RECEPTION_WALLET,
-                claimSerum: true
             };
             processes.push(createWorker(config, pendingAccounts[i]));
         }

@@ -60,6 +60,12 @@ export class DB {
                     ${data?.fireblocksVault ? `fireblocks_vault='${data?.fireblocksVault}', ` : ''}
                     ${data?.vaultId ? `vault_id='${data?.vaultId}', ` : ''}
                     ${data?.status ? `status='${data?.status}', ` : ''}
+
+                    ${data?.claim_timestamp ? `claim_timestamp='${data?.claim_timestamp}', ` : ''}
+                    ${data?.claim_signature ? `claim_signature='${data?.claim_signature}', ` : ''}
+                    ${data?.claim_token_ids ? `claim_token_ids='${data?.claim_token_ids}', ` : ''}
+                    ${data?.claim_txn_id ? `claim_txn_id='${data?.claim_txn_id}', ` : ''}
+                    
                     ${`updated_at='${(new Date()).toISOString()}'`}    
                 WHERE address = '${address}'
             `;

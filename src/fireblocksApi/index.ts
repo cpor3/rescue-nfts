@@ -1,4 +1,4 @@
-import { FireblocksSDK } from "fireblocks-sdk";
+import { FireblocksSDK, PagedVaultAccountsRequestFilters, PeerType } from "fireblocks-sdk";
 import { config } from 'dotenv';
 import path from "path";
 import fs from 'fs';
@@ -36,6 +36,33 @@ export class FireblocksApi {
 
     async setGasStationSettings(min: string, max: string, maxGasPrice?: string, asset?: string) {
         const response = await this.sdk.setGasStationConfiguration(min, max, maxGasPrice, asset ?? 'MATIC_POLYGON');
+        return response;
+    }
+
+    async getVaultId(vaultName: string) {
+        const filter: PagedVaultAccountsRequestFilters = {
+            limit: 500
+        }
+        const response = await this.sdk.getVaultAccountsWithPageInfo(filter);
+        const vaultId = response.accounts.filter(vault => vault.name === vaultName)[0].id;
+        return vaultId;
+    }
+
+    async transferMatic(sourceVaultId: string | number, destVaultId: string | number, amount: number) {
+        const payload = {
+            assetId: 'MATIC_POLYGON',
+            amount: String(amount),
+            source: {
+                type: PeerType.VAULT_ACCOUNT,
+                id: String(sourceVaultId)
+            },
+            destination: {
+                type: PeerType.VAULT_ACCOUNT,
+                id: String(destVaultId)
+            },
+            note: 'Automatic MATIC transfer from API'
+        };
+        const response = await this.sdk.createTransaction(payload);
         return response;
     }
 }

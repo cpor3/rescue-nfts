@@ -12,7 +12,7 @@ import {
     TokensResponse,
 } from './types';
 import { config } from 'dotenv';
-import { Contract, Wallet, formatEther } from 'ethers';
+import { Contract, Wallet } from 'ethers';
 config();
 
 const BASE_URL = "https://api.karmaverse.io/api/v1";
@@ -23,7 +23,8 @@ export class KzApi {
     private nonce = "";
     private token = "";
     private tokenK = "";
-    
+    userId = 0;
+
     constructor(compromisedWalletAddress: string, url?: string) {
         this.url = url || BASE_URL;
         this.compromisedWallet = compromisedWalletAddress.toLowerCase();
@@ -108,6 +109,22 @@ export class KzApi {
     async getWithdrawalsRules() {
         const response = await this.get<WithdrawalRulesResponse>(`wallet-nft/player/query/withdrawalrules`);
         return response.data.data;
+    }
+
+    async getUserId() {
+        throw new Error('Not implemented');
+    }
+
+    async getInGameLevel(userId: number) {
+        const response = await this.get<any>(`wallet-nft/player/query/notauth?userId=${userId}`);
+        return response.data.data;
+    }
+
+    async setInGameLevel(userId: number, level: string) {
+        const urlencoded = new URLSearchParams();
+        urlencoded.append("level", level);
+        const response = await this.post<any>(`wallet-nft/player/query/notauth?userId=${userId}`, urlencoded);
+        return response;
     }
 
     async getInGameKnots() {

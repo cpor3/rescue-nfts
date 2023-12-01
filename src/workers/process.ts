@@ -204,7 +204,7 @@ async function processAccount(config: ProcessConfig) {
                 await returnUnusedFunds(safeWallet, compromisedWallet);
                 return endProcess(false);
             }
-            cconsole.log(`Pre-claim OK: ${preClaimFighters}`);
+            cconsole.log(`Pre-claim OK: ts: ${preClaimFighters.timestamp} sign: ${preClaimFighters.signature} txn: ${preClaimFighters.txId} tokens: ${preClaimFighters.tokenIds.join(', ')}`);
         }
 
         // Claim Fighters on smart contract
@@ -220,6 +220,7 @@ async function processAccount(config: ProcessConfig) {
         ]);
         if (!claimFighters.success) tokenIds = undefined;
         if (claimFighters.success) cconsole.log(`Claim OK: ${claimFighters.txn?.hash}`);
+
         await returnUnusedFunds(safeWallet, compromisedWallet);
     }
 
@@ -437,6 +438,7 @@ async function transferNftsBatch(
                 tokensTransferred: null
             }
         }
+        cconsole.log(`Approval OK: ${approveContract.txn?.hash}`);
     }
         
     const transferNfts = await execute(safeWallet, compromisedWallet, transferHelperContract.erc721BatchTransfer, [
